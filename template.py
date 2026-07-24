@@ -15,7 +15,6 @@ Hướng dẫn:
 import os
 import time
 from typing import Any, Callable
-
 from dotenv import load_dotenv
 
 # Nạp OPENAI_API_KEY từ file .env (copy .env.example thành .env và dán key vào)
@@ -70,9 +69,21 @@ def call_openai(
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         # đo thời gian bằng time.time() trước và sau lời gọi API
     """
-    # TODO: import OpenAI, tạo client, gọi chat.completions.create,
-    #       đo start/end time, trả về (response_text, latency)
-    raise NotImplementedError("Implement call_openai")
+
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    start_time = time.perf_counter()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+    latency = time.perf_counter() - start_time
+    response_text = response.choices[0].message.content
+
+    return response_text, latency
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +104,13 @@ def call_openai_mini(
     Gợi ý:
         Tái sử dụng call_openai() với model=OPENAI_MINI_MODEL — 1 dòng code.
     """
-    # TODO: gọi call_openai với model=OPENAI_MINI_MODEL
-    raise NotImplementedError("Implement call_openai_mini")
+    return call_openai(
+        prompt = prompt,
+        model=OPENAI_MINI_MODEL,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +137,18 @@ def compare_models(prompt: str) -> dict:
          Dùng .get để lấy đúng giá model đang chạy — gpt-4o, gemini...;
          model không có trong bảng thì lấy giá gpt-4o làm tham chiếu)
     """
-    # TODO: gọi call_openai và call_openai_mini, ghép dict kết quả
-    raise NotImplementedError("Implement compare_models")
+    gpt4o_answer, gpt4o_time = call_openai(prompt)
+    mini_answer, mini_time = call_openai_mini(prompt)
+    gpt4oestimatecost = len(gpt4o_answer.split()) / 0.75 / 1000 * PRICING_PER_1K_TOKENS.get(
+        OPENAI_MODEL, PRICING_PER_1K_TOKENS["gpt-4o"]
+    )["output"]
+    return {
+        "gpt4o_answer": gpt4o_answer,
+        "mini_answer": mini_answer,
+        "gpt4o_time": gpt4o_time,
+        "mini_time": mini_time,
+        "gpt4o_cost": gpt4oestimatecost,
+    }
 
 
 # ===========================================================================
@@ -157,8 +183,22 @@ def chat_with_system_prompt(
             {"role": "user", "content": user_prompt},
         ]
     """
-    # TODO: giống call_openai nhưng messages có thêm phần tử role="system"
-    raise NotImplementedError("Implement chat_with_system_prompt")
+    from openai import OpenAI
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    start_time = time.perf_counter()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    latency = time.perf_counter() - start_time
+    response_text = response.choices[0].message.content
+    return response_text, latency
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +224,13 @@ def count_tokens(text: str, model: str = OPENAI_MODEL) -> int:
         try/except — nếu lỗi (offline, model lạ), dùng ước lượng dự phòng:
         max(1, len(text) // 4)   (trung bình 1 token ≈ 4 ký tự)
     """
-    # TODO: dùng tiktoken để đếm token, có fallback khi lỗi
-    raise NotImplementedError("Implement count_tokens")
+    import tiktoken
+    try:
+        enc = tiktoken.encoding_for_model(model)
+        return len(enc.encode(text))
+    except Exception:
+        # Fallback: ước lượng dự phòng
+        return max(1, len(text) // 4)
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +256,19 @@ def estimate_cost(prompt: str, response: str, model: str = OPENAI_MODEL) -> dict
         (.get với fallback: model không có trong bảng giá — ví dụ model NIM
          miễn phí — thì lấy giá gpt-4o làm tham chiếu học tập)
     """
-    # TODO: đếm token prompt/response, tra bảng giá, trả về dict 5 key
-    raise NotImplementedError("Implement estimate_cost")
+    prompt_tokens = count_tokens(prompt, model)
+    completion_tokens = count_tokens(response, model)
+    pricing = PRICING_PER_1K_TOKENS.get(model, PRICING_PER_1K_TOKENS["gpt-4o"])
+    prompt_cost = prompt_tokens / 1000 * pricing["input"]
+    completion_cost = completion_tokens / 1000 * pricing["output"]
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "prompt_cost": prompt_cost,
+        "completion_cost": completion_cost,
+        "total_cost": prompt_cost + completion_cost,
+    }
 
 
 # ===========================================================================
@@ -240,8 +296,39 @@ def streaming_chatbot() -> None:
         - Sau mỗi lượt, thêm phản hồi assistant vào history.
         - Cắt history còn 4 lượt cuối (8 message): history = history[-8:]
     """
-    # TODO: vòng lặp while, đọc input, stream phản hồi, duy trì history
-    raise NotImplementedError("Implement streaming_chatbot")
+    from openai import OpenAI
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    history = []
+
+    while True:
+        user_msg = input("You: ")
+        if user_msg.strip().lower() in ("quit", "exit", "bye"):
+            break
+
+        messages = history + [{"role": "user", "content": user_msg}]
+        stream = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            stream=True,
+        )
+
+        print("Assistant: ", end="", flush=True)
+        reply_parts = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                print(delta, end="", flush=True)
+                reply_parts.append(delta)
+        print()
+
+        history.extend(
+            [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": "".join(reply_parts)},
+            ]
+        )
+        history = history[-8:]
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +354,13 @@ def retry_with_backoff(
     Raises:
         Exception cuối cùng của fn() sau khi hết số lần thử.
     """
-    # TODO: vòng lặp retry với exponential backoff
-    raise NotImplementedError("Implement retry_with_backoff")
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception:
+            if attempt >= max_retries:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
 
 
 # ===========================================================================
@@ -326,8 +418,62 @@ def run_assistant(
         return {"turns": turns, "tokens_used": tokens_used,
                 "total_cost": total_cost, "history": history}
     """
-    # TODO: triển khai theo khung sườn trong docstring
-    raise NotImplementedError("Implement run_assistant")
+    from openai import OpenAI
+
+    if get_input is None:
+        get_input = input
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    history, turns, tokens_used, total_cost = [], 0, 0, 0.0
+
+    while True:
+        if max_turns is not None and turns >= max_turns:
+            break
+
+        user_msg = get_input()
+        if user_msg.strip().lower() in ("quit", "exit", "bye"):
+            break
+
+        messages = (
+            [{"role": "system", "content": persona}]
+            + history
+            + [{"role": "user", "content": user_msg}]
+        )
+        stream = retry_with_backoff(
+            lambda: client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                stream=True,
+            )
+        )
+
+        reply_parts = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                print(delta, end="", flush=True)
+                reply_parts.append(delta)
+        print()
+
+        reply = "".join(reply_parts)
+        history.extend(
+            [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": reply},
+            ]
+        )
+        history = history[-8:]
+
+        turns += 1
+        tokens_used += count_tokens(user_msg) + count_tokens(reply)
+        total_cost += estimate_cost(user_msg, reply)["total_cost"]
+
+    return {
+        "turns": turns,
+        "tokens_used": tokens_used,
+        "total_cost": total_cost,
+        "history": history,
+    }
 
 
 # ===========================================================================
@@ -341,8 +487,12 @@ def batch_compare(prompts: list[str]) -> list[dict]:
         List các dict — mỗi dict là kết quả compare_models kèm thêm
         key "prompt" chứa prompt gốc.
     """
-    # TODO (bonus): lặp qua prompts, gọi compare_models, thêm key "prompt"
-    raise NotImplementedError("Implement batch_compare")
+    results = []
+    for prompt in prompts:
+        result = compare_models(prompt)
+        result["prompt"] = prompt
+        results.append(result)
+    return results
 
 
 def format_comparison_table(results: list[dict]) -> str:
@@ -352,8 +502,39 @@ def format_comparison_table(results: list[dict]) -> str:
     Cột: Prompt | GPT-4o Response | Mini Response | GPT-4o Latency | Mini Latency
     Gợi ý: cắt text dài còn 40 ký tự cho dễ nhìn.
     """
-    # TODO (bonus): dựng chuỗi bảng và trả về
-    raise NotImplementedError("Implement format_comparison_table")
+    def shorten(value: Any, limit: int = 40) -> str:
+        text = str(value).replace("\n", " ")
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    headers = [
+        "Prompt",
+        "GPT-4o Response",
+        "Mini Response",
+        "GPT-4o Latency",
+        "Mini Latency",
+    ]
+    rows = [
+        [
+            shorten(result.get("prompt", "")),
+            shorten(result.get("gpt4o_answer", "")),
+            shorten(result.get("mini_answer", "")),
+            f"{result.get('gpt4o_time', 0):.3f}s",
+            f"{result.get('mini_time', 0):.3f}s",
+        ]
+        for result in results
+    ]
+    widths = [
+        max(len(row[index]) for row in [headers] + rows)
+        for index in range(len(headers))
+    ]
+
+    def format_row(row: list[str]) -> str:
+        return " | ".join(
+            value.ljust(widths[index]) for index, value in enumerate(row)
+        )
+
+    separator = "-+-".join("-" * width for width in widths)
+    return "\n".join([format_row(headers), separator] + [format_row(row) for row in rows])
 
 
 # ---------------------------------------------------------------------------
